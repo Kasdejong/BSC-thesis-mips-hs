@@ -148,16 +148,16 @@ executeInstructions cpu (instr:instrs) = do
       newCpu <- issueInstruction cpu instr 
       return newCpu)
   case newCpu of
-    Nothing -> return (executeInstructions (runReservationStations cpu) instrs)
-    Just newCpu' -> return (executeInstructions newCpu instrs)
+    Nothing -> (executeInstructions (runReservationStations cpu) instrs) -- nothing to issue, just run the reservation stations
+    Just newCpu' -> (executeInstructions newCpu' instrs)-- not everything issued, we pretend like nothing runs until everything is issued
     
 -- A function to run the reservation stations
-runReservationStations :: CPU -> IO CPU
+runReservationStations :: CPU -> CPU
 runReservationStations cpu = do
-  let stations = stations cpu
-  let newStations = map (updateStation cpu) stations
+  let oldStations = stations cpu
+  let newStations = map (updateStation cpu) oldStations
   let newCpu = cpu { stations = newStations }
-  return newCpu
+  newCpu
   
 -- A function to update the reservation stations
 updateStation :: CPU -> ResStation -> ResStation
