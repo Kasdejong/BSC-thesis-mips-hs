@@ -1,4 +1,5 @@
 module Main (main) where
+import Debug.Trace
 
 -- subset of MIPS instructions, (add, mov, lw, sw)
 
@@ -137,7 +138,11 @@ createLoadStation cpu (INSTR_SW r1 addr) = ResStation {
 
 -- A simple function to execute a list of instructions
 executeInstructions :: CPU -> [Instruction] -> IO CPU
-executeInstructions cpu [] = return cpu
+executeInstructions cpu [] = case all (not . busy) (stations cpu) of
+  True -> return cpu -- all stations are free, we can return the CPU state
+  False -> do
+    let newCpu = runReservationStations cpu
+    executeInstructions newCpu [] -- run the reservation stations until they are all free
 executeInstructions cpu (instr:instrs) = do
   newCpu <- (case instr of
     INSTR_NOP -> return (Just cpu)
@@ -148,7 +153,8 @@ executeInstructions cpu (instr:instrs) = do
       newCpu <- issueInstruction cpu instr 
       return newCpu)
   case newCpu of
-    Nothing -> (executeInstructions (runReservationStations cpu) instrs) -- nothing to issue, just run the reservation stations
+    Nothing -> do
+      (executeInstructions (runReservationStations cpu) (instr:instrs)) -- nothing to issue, just run the reservation stations
     Just newCpu' -> (executeInstructions newCpu' instrs)-- not everything issued, we pretend like nothing runs until everything is issued
     
 -- A function to run the reservation stations
@@ -163,9 +169,9 @@ runReservationStations cpu = do
 updateStation :: CPU -> ResStation -> ResStation
 updateStation cpu station = 
   case op station of
-    OP_ADD -> if busy station then station { busy = False } else station
-    OP_LW -> if busy station then station { busy = False } else station
-    OP_SW -> if busy station then station { busy = False } else station
+    OP_ADD -> if busy station then trace "running add" station { busy = False } else station
+    OP_LW -> if busy station then trace "running load" station { busy = False } else station
+    OP_SW -> if busy station then trace "running store" station { busy = False } else station
     _ -> error "Invalid operation in reservation station"
   
 data CPU = 
