@@ -24,6 +24,7 @@ data RegValue =
 data RSID = RS_ADD1 | RS_ADD2 | RS_LS1 deriving (Show, Eq, Enum)
   
 data ResStation = ResStation {
+    rsid :: RSID,
     op :: Operation,
     vj :: Int,
     vk :: Int,
@@ -39,7 +40,7 @@ sampleInstructions =
   , INSTR_ADD R2 R3 R4
   , INSTR_MOV R2 R4
   , INSTR_LW R3 4
-  , INSTR_SW R4 4
+ -- , INSTR_SW R4 4
   , INSTR_NOP
   ]
   
@@ -66,9 +67,9 @@ issueInstruction cpu instr = do
   newCpu <- (case chooseStation cpu instr of
     Just stationID -> do
       let newStation = case instr of
-            INSTR_ADD rd r1 r2 -> createAddStation cpu r1 r2
-            INSTR_LW r1 addr    -> createLoadStation cpu instr
-            INSTR_SW r1 addr    -> createLoadStation cpu instr
+            INSTR_ADD rd r1 r2 -> createAddStation cpu r1 r2 stationID
+            INSTR_LW r1 addr    -> createLoadStation cpu instr stationID
+            INSTR_SW r1 addr    -> createLoadStation cpu instr stationID
             _                   -> error "Invalid instruction for reservation station"
       let newStations = writeToSeq (stations cpu) (fromEnum stationID) newStation
       let newCpu = case instr of
@@ -83,8 +84,9 @@ issueInstruction cpu instr = do
   return newCpu
 
 
-createAddStation :: CPU -> RegID -> RegID -> ResStation
-createAddStation cpu r1 r2 = ResStation {
+createAddStation :: CPU -> RegID -> RegID -> RSID -> ResStation
+createAddStation cpu r1 r2 rsid = ResStation {
+  rsid = rsid,
   op = OP_ADD,
   vj = case state1 of
     Val v -> v
@@ -104,8 +106,9 @@ createAddStation cpu r1 r2 = ResStation {
   state1 = mapRegIDToValue cpu r1
   state2 = mapRegIDToValue cpu r2
   
-createLoadStation :: CPU -> Instruction -> ResStation
-createLoadStation cpu (INSTR_LW r1 addr) = ResStation {
+createLoadStation :: CPU -> Instruction -> RSID -> ResStation
+createLoadStation cpu (INSTR_LW r1 addr) rsid = ResStation {
+  rsid = rsid,
   op = OP_LW,
   qj = case state1 of
     Val _ -> Nothing
@@ -118,7 +121,8 @@ createLoadStation cpu (INSTR_LW r1 addr) = ResStation {
   a = addr,
   busy = True
 } where state1 = mapRegIDToValue cpu r1
-createLoadStation cpu (INSTR_SW r1 addr) = ResStation {
+createLoadStation cpu (INSTR_SW r1 addr) rsid = ResStation {
+  rsid = rsid,
   op = OP_SW,
   qj = case state1 of
     Val _ -> Nothing
@@ -159,20 +163,56 @@ executeInstructions cpu (instr:instrs) = do
     
 -- A function to run the reservation stations
 runReservationStations :: CPU -> CPU
-runReservationStations cpu = do
+runReservationStations cpu = trace "attempting to run stations" (do
   let oldStations = stations cpu
-  let newStations = map (updateStation cpu) oldStations
-  let newCpu = cpu { stations = newStations }
-  newCpu
+  let newCpu = foldl executeAndWrite cpu oldStations
+  newCpu)
   
--- A function to update the reservation stations
-updateStation :: CPU -> ResStation -> ResStation
-updateStation cpu station = 
-  case op station of
-    OP_ADD -> if busy station then trace "running add" station { busy = False } else station
-    OP_LW -> if busy station then trace "running load" station { busy = False } else station
-    OP_SW -> if busy station then trace "running store" station { busy = False } else station
-    _ -> error "Invalid operation in reservation station"
+executeAndWrite :: CPU -> ResStation -> CPU
+executeAndWrite cpu station = 
+  if busy station 
+  then case op station of
+    OP_ADD -> trace "attempting add" (executeAdd cpu station{busy = False})
+    OP_LW -> trace "attempting load" (executeLoad cpu station{busy = False}) 
+    OP_SW -> trace "attempting store" (executeStore cpu station{busy = False}) 
+    _ -> cpu
+  else cpu
+  
+executeAdd :: CPU -> ResStation -> CPU
+executeAdd cpu station = 
+  if qj station == Nothing && qk station == Nothing
+  then trace "add ready for execution" cpu { reg = overwritePendingRegs (reg cpu) (rsid station) (vj station + vk station), 
+             stations = overwritePendingResStations (stations cpu) (rsid station) (vj station + vk station) }
+  else cpu
+  
+executeLoad :: CPU -> ResStation -> CPU
+executeLoad cpu station = 
+  if qj station == Nothing
+  then trace "load ready for execution" cpu { reg = overwritePendingRegs (reg cpu) (rsid station) (mem cpu !! (vj station + a station)), 
+             stations = overwritePendingResStations (stations cpu) (rsid station) (mem cpu !! (vj station + a station)) }
+  else cpu
+  
+executeStore :: CPU -> ResStation -> CPU
+executeStore cpu station = 
+  if qj station == Nothing
+  then do 
+    trace "load ready for execution" cpu { mem = writeToSeq (mem cpu) (vj station + a station) (vk station) }
+  else cpu
+    
+
+overwritePendingRegs :: [RegValue] -> RSID -> Int -> [RegValue]
+overwritePendingRegs regs rsid result = 
+  map (\x -> case x of
+    Pending rsid -> if rsid == rsid then Val result else x
+    _ -> x) regs
+    
+overwritePendingResStations :: [ResStation] -> RSID -> Int -> [ResStation]
+overwritePendingResStations stations rsid result = 
+  map (\x -> do 
+    let x' = if qj x == Just rsid then x { vj = result, qj = Nothing } else x
+    let x'' = if qk x' == Just rsid then x' { vk = result, qk = Nothing } else x'
+    x''
+  ) stations
   
 data CPU = 
     CPU { reg :: [RegValue], 
@@ -183,11 +223,11 @@ data CPU =
   
 -- Initialize the reservation stations
 initResStation :: ResStation
-initResStation = ResStation { op = OP_ADD, vj = 0, vk = 0, qj = Nothing, qk = Nothing, a = 0, busy = False }
+initResStation = ResStation { rsid = RS_ADD1, op = OP_ADD, vj = 0, vk = 0, qj = Nothing, qk = Nothing, a = 0, busy = False }
   
 -- Initialize the CPU with some registers and memory
 initCPU :: CPU
-initCPU = CPU { reg = [Val 2, Val 3, Val 4, Val 5, Val 6, Val 7, Val 8, Val 9], pc = 0, mem = replicate 64 0, stations = [initResStation, initResStation, initResStation] }
+initCPU = CPU { reg = [Val 2, Val 3, Val 4, Val 5, Val 6, Val 7, Val 8, Val 9], pc = 0, mem = replicate 64 0, stations = [initResStation {rsid = RS_ADD1}, initResStation {rsid = RS_ADD2}, initResStation {rsid = RS_LS1}] }
 
 -- map registers to their values
 mapRegIDToValue :: CPU -> RegID -> RegValue
