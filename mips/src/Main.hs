@@ -257,7 +257,7 @@ executeStore cpu station
           storeVal = vk station
           absTag = case robTagRS station of Just t -> t; Nothing -> error "No ROB tag"
           newROB = updateROBEntryStore (rob cpu) absTag storeAddr storeVal True (robOffset cpu)
-      in trace ("store ready for execution, ROB tag " ++ show absTag ++ ", pending store: " ++ show storeVal ++ " at address " ++ show storeAddr ++ " full state: " ++ show cpu) cpu { rob = newROB }
+      in trace ("store ready for execution, ROB tag " ++ show absTag ++ ", pending store: " ++ show storeVal ++ " at address " ++ show storeAddr) cpu { rob = newROB }
   | otherwise = cpu
 
 -- All ROB accesses use absolute tags and robOffset
