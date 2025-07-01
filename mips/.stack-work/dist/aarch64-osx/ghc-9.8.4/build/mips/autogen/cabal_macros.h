@@ -20,6 +20,16 @@
   (major1) == 4 && (major2) <  19 || \
   (major1) == 4 && (major2) == 19 && (minor) <= 2)
 #endif /* MIN_VERSION_base */
+/* package mips-0.1.0.0 */
+#ifndef VERSION_mips
+#define VERSION_mips "0.1.0.0"
+#endif /* VERSION_mips */
+#ifndef MIN_VERSION_mips
+#define MIN_VERSION_mips(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  1 || \
+  (major1) == 0 && (major2) == 1 && (minor) <= 0)
+#endif /* MIN_VERSION_mips */
 
 /* tool gcc-16.0.0 */
 #ifndef TOOL_VERSION_gcc
@@ -93,7 +103,7 @@
 #endif /* MIN_TOOL_VERSION_runghc */
 
 #ifndef CURRENT_COMPONENT_ID
-#define CURRENT_COMPONENT_ID "mips-0.1.0.0-JWXYKiAmp2OFmP3vksqAmk-mips"
+#define CURRENT_COMPONENT_ID "mips-0.1.0.0-FT5CPEstjXX70TD3X5sARU-mips"
 #endif /* CURRENT_COMPONENT_ID */
 #ifndef CURRENT_PACKAGE_VERSION
 #define CURRENT_PACKAGE_VERSION "0.1.0.0"

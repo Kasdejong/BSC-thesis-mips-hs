@@ -47,7 +47,7 @@ getBinDir, getLibDir, getDynLibDir, getDataDir, getLibexecDir, getSysconfDir :: 
 
 bindir, libdir, dynlibdir, datadir, libexecdir, sysconfdir :: FilePath
 bindir     = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/bin"
-libdir     = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/lib/aarch64-osx-ghc-9.8.4/mips-0.1.0.0-JWXYKiAmp2OFmP3vksqAmk-mips"
+libdir     = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/lib/aarch64-osx-ghc-9.8.4/mips-0.1.0.0-FT5CPEstjXX70TD3X5sARU-mips"
 dynlibdir  = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/lib/aarch64-osx-ghc-9.8.4"
 datadir    = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/share/aarch64-osx-ghc-9.8.4/mips-0.1.0.0"
 libexecdir = "/Users/kasdejong/IdeaProjects/BSC-thesis-mips-hs/mips/.stack-work/install/aarch64-osx/f585b035de5ef31dbf138ca0cb58261c8f025cbc39068a9fb44a12e9afd404ff/9.8.4/libexec/aarch64-osx-ghc-9.8.4/mips-0.1.0.0"
