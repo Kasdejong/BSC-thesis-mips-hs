@@ -1,19 +1,14 @@
-module Main ( main
-               , Instruction(..)
-               , RegID(..)
-               , RegValue(..)
-               , RSID(..)
-               , ROBEntry(..)
-               , ResStation(..)
-               , CPU(..)
-               , initCPU
-               , executeInstructions
-               , mapRegIDToValue
-               , Operation(..)
-              ) where
-import Debug.Trace
+{-# LANGUAGE RecordWildCards #-}
+module Main where
 
--- MIPS instructions (add, mov, lw, sw, beq, bne, nop)
+import Debug.Trace
+import Data.List (find, elemIndex)
+import Data.Maybe (isJust, isNothing, fromJust, fromMaybe)
+
+-- ============================================================================
+-- CORE DATA TYPES
+-- ============================================================================
+
 data Instruction =
     INSTR_ADD RegID RegID RegID
   | INSTR_MOV RegID RegID
@@ -24,402 +19,443 @@ data Instruction =
   | INSTR_NOP
   deriving (Show, Eq)
 
-data Operation = OP_ADD | OP_LW | OP_SW | OP_MV | OP_BEQ | OP_BNE deriving (Show, Eq, Enum)
+data Operation = OP_ADD | OP_LW | OP_SW | OP_BEQ | OP_BNE deriving (Show, Eq)
 
-data RegID = R0 | R1 | R2 | R3 | R4 | R5 | R6 | R7 deriving (Show, Eq, Enum)
+data RegID = R0 | R1 | R2 | R3 | R4 | R5 | R6 | R7 deriving (Show, Eq, Enum, Bounded)
 
 data RegValue = Val Int | Pending Int Int deriving (Show, Eq)
 
-data RSID = RS_ADD1 | RS_ADD2 | RS_LS1 deriving (Show, Eq, Enum)
+data RSID = RS_ADD1 | RS_ADD2 | RS_LS1 deriving (Show, Eq, Enum, Bounded)
 
+-- Simplified ROB Entry
 data ROBEntry = ROBEntry {
-    robTag   :: Int,            -- Absolute ROB tag
-    robInstr :: Instruction,
-    robDest  :: Maybe RegID,    -- Register destination
-    robAddr  :: Maybe Int,      -- Memory address (for stores/loads)
-    robValue :: Maybe Int,      -- Value/result (if ready)
-    robReady :: Bool            -- Is result ready?
+    robTag     :: Int,
+    robInstr   :: Instruction,
+    robDest    :: Maybe RegID,
+    robResult  :: Maybe Int,
+    robAddr    :: Maybe Int,  -- For stores
+    robReady   :: Bool
 } deriving (Show, Eq)
 
+-- Simplified Reservation Station
 data ResStation = ResStation {
-    rsid     :: RSID,
-    op       :: Operation,
-    vj       :: Int,
-    vk       :: Int,
-    qj       :: Maybe Int,      -- Source 1: waiting for ROB tag
-    qk       :: Maybe Int,      -- Source 2: waiting for ROB tag
-    a        :: Int,            -- For loads/stores/branches
-    busy     :: Bool,
-    robTagRS :: Maybe Int       -- Which ROB entry does this station write to?
+    rsid       :: RSID,
+    operation  :: Operation,
+    operand1   :: Maybe Int,    -- Nothing means waiting
+    operand2   :: Maybe Int,    -- Nothing means waiting
+    waitTag1   :: Maybe Int,    -- ROB tag we're waiting for
+    waitTag2   :: Maybe Int,    -- ROB tag we're waiting for
+    immediate  :: Int,          -- For loads/stores/branches
+    busy       :: Bool,
+    destTag    :: Maybe Int     -- ROB tag this writes to
 } deriving (Show, Eq)
 
 data CPU = CPU {
-    reg      :: [RegValue],
-    stations :: [ResStation],
-    rob      :: [ROBEntry],
-    pc       :: Int,            -- Current program counter
-    mem      :: [Int],
-    robOffset :: Int,           -- Absolute index of the head of the ROB
-    program  :: [Instruction]   -- Program storage
+    registers   :: [RegValue],
+    stations    :: [ResStation],
+    rob         :: [ROBEntry],
+    pc          :: Int,
+    memory      :: [Int],
+    robOffset   :: Int,
+    program     :: [Instruction],
+    cycleCount  :: Int
 } deriving (Show)
 
-chooseStation :: CPU -> Instruction -> Maybe RSID
-chooseStation cpu (INSTR_ADD _ _ _) =
-  if not (busy (stations cpu !! fromEnum RS_ADD1))
-  then Just RS_ADD1
-  else if not (busy (stations cpu !! fromEnum RS_ADD2))
-       then Just RS_ADD2
-       else Nothing
-chooseStation cpu (INSTR_LW _ _ _) =
-  if not (busy (stations cpu !! fromEnum RS_LS1))
-  then Just RS_LS1
-  else Nothing
-chooseStation cpu (INSTR_SW _ _ _) =
-  if not (busy (stations cpu !! fromEnum RS_LS1))
-  then Just RS_LS1
-  else Nothing
-chooseStation cpu (INSTR_BEQ _ _ _) =
-  if not (busy (stations cpu !! fromEnum RS_ADD1))
-  then Just RS_ADD1
-  else if not (busy (stations cpu !! fromEnum RS_ADD2))
-       then Just RS_ADD2
-       else Nothing
-chooseStation cpu (INSTR_BNE _ _ _) =
-  if not (busy (stations cpu !! fromEnum RS_ADD1))
-  then Just RS_ADD1
-  else if not (busy (stations cpu !! fromEnum RS_ADD2))
-       then Just RS_ADD2
-       else Nothing
-chooseStation _ _ = error "Invalid instruction for reservation station"
+-- ============================================================================
+-- CONFIGURATION & INITIALIZATION
+-- ============================================================================
 
-allocateROBEntry :: CPU -> Instruction -> Maybe RegID -> (CPU, Int)
-allocateROBEntry cpu instr dest =
-  let tag = robOffset cpu + length (rob cpu)
-      entry = ROBEntry tag instr dest Nothing Nothing False
-      newROB = rob cpu ++ [entry]
-  in (cpu { rob = newROB }, tag)
+initialMemory :: [Int]
+initialMemory = [1,0,0,0, 2,0,0,0, 3,0,0,0, 4,0,0,0,  -- Matrix A
+                 3,0,0,0, 4,0,0,0,                      -- Vector B
+                 0,0,0,0, 0,0,0,0]                      -- Results
 
-issueInstruction :: CPU -> Instruction -> IO (Maybe CPU)
-issueInstruction cpu instr = do
-  putStrLn ("Issuing instruction " ++ show instr)
-  case chooseStation cpu instr of
-    Just stationID -> do
-      let destReg = case instr of
-                      INSTR_ADD rd _ _ -> Just rd
-                      INSTR_LW rd _ _   -> Just rd
-                      _                -> Nothing
-          (cpuWithROB, absTag) = allocateROBEntry cpu instr destReg
-          newStation = case instr of
-            INSTR_ADD _ r1 r2  -> createAddStation cpuWithROB r1 r2 stationID (Just absTag)
-            INSTR_LW _ _ _       -> createLoadStation cpuWithROB instr stationID (Just absTag)
-            INSTR_SW _ _ _       -> createStoreStation cpuWithROB instr stationID (Just absTag)
-            INSTR_BEQ r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB + 1) stationID (Just absTag) True
-            INSTR_BNE r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB + 1) stationID (Just absTag) False
-            _                  -> error "Invalid instruction for reservation station"
-          newStations = writeToSeq (stations cpuWithROB) (fromEnum stationID) newStation
-          newRegs = case destReg of
-            Just destRegId -> updateRegs (reg cpuWithROB) destRegId absTag
-            Nothing        -> reg cpuWithROB
-          newCpu = cpuWithROB { stations = newStations, reg = newRegs }
-      putStrLn ("Issued to station " ++ show stationID ++ " and ROB tag " ++ show absTag)
-      return (Just newCpu)
-    Nothing -> do
-      putStrLn "No available reservation stations for operation"
-      return Nothing
+initialRegisters :: [RegValue]
+initialRegisters = [Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val (-1)]
 
-createAddStation :: CPU -> RegID -> RegID -> RSID -> Maybe Int -> ResStation
-createAddStation cpu r1 r2 selfRsid destRobTag = ResStation {
-  rsid = selfRsid,
-  op = OP_ADD,
-  vj = case state1 of Val v -> v; Pending _ _ -> 0,
-  vk = case state2 of Val v -> v; Pending _ _ -> 0,
-  qj = case state1 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  qk = case state2 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  a = 0,
-  busy = True,
-  robTagRS = destRobTag
-} where 
-    state1 = mapRegIDToValue cpu r1
-    state2 = mapRegIDToValue cpu r2
-
-createLoadStation :: CPU -> Instruction -> RSID -> Maybe Int -> ResStation
-createLoadStation cpu (INSTR_LW r1 srcImm srcReg) selfRsid destRobTag = ResStation {
-  rsid = selfRsid,
-  op = OP_LW,
-  qj = Nothing,  -- No first operand for loads
-  qk = case state2 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  vj = 0,        -- No first operand
-  vk = case state2 of Val v -> v; Pending _ _ -> 0,
-  a = srcImm,
-  busy = True,
-  robTagRS = destRobTag
-} where 
-    state2 = mapRegIDToValue cpu srcReg
-createLoadStation _ _ _ _ = error "Invalid instruction for load station"
-
-createStoreStation :: CPU -> Instruction -> RSID -> Maybe Int -> ResStation
-createStoreStation cpu (INSTR_SW r1 destImm destReg) selfRsid destRobTag = ResStation {
-  rsid = selfRsid,
-  op = OP_SW,
-  qj = case state1 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  qk = case state2 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  vj = case state1 of Val v -> v; Pending _ _ -> 0,
-  vk = case state2 of Val v -> v; Pending _ _ -> 0,
-  a = destImm,
-  busy = True,
-  robTagRS = destRobTag
-} where 
-    state1 = mapRegIDToValue cpu r1
-    state2 = mapRegIDToValue cpu destReg
-createStoreStation _ _ _ _ = error "Invalid instruction for store station"
-
-createBranchStation :: CPU -> RegID -> RegID -> Int -> RSID -> Maybe Int -> Bool -> ResStation
-createBranchStation cpu r1 r2 dest selfRsid destRobTag shouldEqual = ResStation {
-  rsid = selfRsid,
-  op = case shouldEqual of True -> OP_BEQ; False -> OP_BNE,  -- For simplicity, use OP_BEQ for both (adjust as needed)
-  vj = case state1 of Val v -> v; Pending _ _ -> 0,
-  vk = case state2 of Val v -> v; Pending _ _ -> 0,
-  qj = case state1 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  qk = case state2 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  a = dest,
-  busy = True,
-  robTagRS = destRobTag
-} where
-  state1 = mapRegIDToValue cpu r1
-  state2 = mapRegIDToValue cpu r2
-
-runReservationStations :: CPU -> CPU
-runReservationStations cpu =
-  foldl (\c stn -> if busy stn then executeAndWrite c stn else c) cpu (stations cpu)
-
-executeAndWrite :: CPU -> ResStation -> CPU
-executeAndWrite cpu station
-  | not (busy station) = cpu
-  | otherwise = case op station of
-      OP_ADD -> executeAdd cpu station
-      OP_LW  -> executeLoad cpu station
-      OP_SW  -> executeStore cpu station
-      OP_BEQ -> executeBranch cpu station
-      OP_BNE -> executeBranch cpu station
-      _      -> cpu
-
-executeAdd :: CPU -> ResStation -> CPU
-executeAdd cpu station
-  | qj station == Nothing && qk station == Nothing =
-      let result = vj station + vk station
-          absTag = case robTagRS station of Just t -> t; Nothing -> error "No ROB tag"
-          newROB = updateROBEntry (rob cpu) absTag (Just result) True (robOffset cpu)
-          newStations = overwritePendingResStations (stations cpu) absTag result
-          clearedStations = writeToSeq newStations (fromEnum (rsid station)) (station { busy = False })
-      in trace ("add ready for execution, ROB tag " ++ show absTag ++ " result " ++ show result) cpu { rob = newROB, stations = clearedStations }
-  | otherwise = cpu
-
-executeLoad :: CPU -> ResStation -> CPU
-executeLoad cpu station
-  | qj station == Nothing && qk station == Nothing =
-      let loadAddr = a station + vk station
-          result = mem cpu !! loadAddr
-          absTag = case robTagRS station of Just t -> t; Nothing -> error "No ROB tag"
-          newROB = updateROBEntry (rob cpu) absTag (Just result) True (robOffset cpu)
-          newStations = overwritePendingResStations (stations cpu) absTag result
-          clearedStations = writeToSeq newStations (fromEnum (rsid station)) (station { busy = False })
-      in trace ("load ready for execution, ROB tag " ++ show absTag ++ " result " ++ show result) cpu { rob = newROB, stations = clearedStations }
-  | otherwise = cpu
-
-executeStore :: CPU -> ResStation -> CPU
-executeStore cpu station
-  | qj station == Nothing && qk station == Nothing =
-      let storeAddr = a station + vk station
-          storeVal = vj station
-          absTag = case robTagRS station of Just t -> t; Nothing -> error "No ROB tag"
-          newROB = updateROBEntryStore (rob cpu) absTag storeAddr storeVal True (robOffset cpu)
-      in trace ("store ready for execution, ROB tag " ++ show absTag ++ ", pending store: " ++ show storeVal ++ " at address " ++ show storeAddr) cpu { rob = newROB }
-  | otherwise = cpu
-
-executeBranch :: CPU -> ResStation -> CPU
-executeBranch cpu station
-  | qj station == Nothing && qk station == Nothing =
-      let r1 = vj station
-          r2 = vk station
-          taken = case op station of
-                    OP_BEQ -> r1 == r2
-                    OP_BNE -> r1 /= r2
-                    _ -> error "Invalid operation for branch"
-          absTag = case robTagRS station of Just t -> t; Nothing -> error "No ROB tag"
-          newROB = updateROBEntry (rob cpu) absTag (if taken then Just (a station) else Nothing) True (robOffset cpu)
-          clearedStations = writeToSeq (stations cpu) (fromEnum (rsid station)) (station { busy = False })
-      in trace ("branch ready for execution, ROB tag " ++ show absTag ++ ", taken: " ++ show taken ++ ", destination: " ++ show (a station)) cpu { rob = newROB, stations = clearedStations }
-  | otherwise = cpu
-
-overwritePendingRegs :: [RegValue] -> Int -> Int -> [RegValue]
-overwritePendingRegs regs absTag result =
-  map (\x -> case x of
-    Pending tag _ -> if tag == absTag then Val result else x
-    _ -> x) regs
-
-overwritePendingResStations :: [ResStation] -> Int -> Int -> [ResStation]
-overwritePendingResStations resStations absTag result =
-  map (\x ->
-    let x'  = if qj x == Just absTag then x { vj = result, qj = Nothing } else x
-        x'' = if qk x' == Just absTag then x' { vk = result, qk = Nothing } else x'
-    in x''
-  ) resStations
-
-updateROBEntry :: [ROBEntry] -> Int -> Maybe Int -> Bool -> Int -> [ROBEntry]
-updateROBEntry entries absTag val ready robOffset' =
-  let idx = absTag - robOffset'
-  in if idx < 0 || idx >= length entries
-     then error $ "ROB tag " ++ show absTag ++ " out of bounds (offset " ++ show robOffset' ++ ", len " ++ show (length entries) ++ ")"
-     else take idx entries ++
-          [ (entries !! idx) { robValue = val, robReady = ready } ] ++
-          drop (idx + 1) entries
-
-updateROBEntryStore :: [ROBEntry] -> Int -> Int -> Int -> Bool -> Int -> [ROBEntry]
-updateROBEntryStore entries absTag addr val ready robOffset' =
-  let idx = absTag - robOffset'
-  in if idx < 0 || idx >= length entries
-     then error $ "ROB tag " ++ show absTag ++ " out of bounds (offset " ++ show robOffset' ++ ", len " ++ show (length entries) ++ ")"
-     else take idx entries ++
-          [ (entries !! idx) { robAddr = Just addr, robValue = Just val, robReady = ready } ] ++
-          drop (idx + 1) entries
-
-commitROB :: CPU -> CPU
-commitROB cpu =
-  case rob cpu of
-    [] -> cpu
-    (entry:rest) ->
-      if robReady entry
-      then case robInstr entry of
-        INSTR_ADD _ _ _ ->
-          let newRegs = overwritePendingRegs (reg cpu) (robTag entry) (unwrap (robValue entry))
-              newStations = overwritePendingResStations (stations cpu) (robTag entry) (unwrap (robValue entry))
-              newCpu = cpu { reg = newRegs, stations = newStations, rob = rest, robOffset = robOffset cpu + 1 }
-          in trace ("committed load: " ++ show newCpu) newCpu
-        INSTR_LW _ _ _ ->
-          let newRegs = overwritePendingRegs (reg cpu) (robTag entry) (unwrap (robValue entry))
-              newStations = overwritePendingResStations (stations cpu) (robTag entry) (unwrap (robValue entry))
-              newCpu = cpu { reg = newRegs, stations = newStations, rob = rest, robOffset = robOffset cpu + 1 }
-          in trace ("committed load: " ++ show newCpu) newCpu
-        INSTR_SW _ _ _ ->
-          let addr = unwrap (robAddr entry)
-              val  = unwrap (robValue entry)
-              newMem = writeToSeq (mem cpu) addr val
-              newStations = freeStoreStation (stations cpu) (robTag entry)
-              newCpu = cpu { mem = newMem, stations = newStations, rob = rest, robOffset = robOffset cpu + 1 }
-          in trace ("committed store: " ++ show newCpu) newCpu
-        INSTR_BEQ _ _ _ -> commitBranchROB cpu entry rest
-        INSTR_BNE _ _ _ -> commitBranchROB cpu entry rest
-        _ -> cpu { rob = rest, robOffset = robOffset cpu + 1 }
-      else cpu
-  where
-    unwrap (Just x) = x
-    unwrap Nothing  = error "ROB entry not ready"
-    clearStation s = s { busy = False }
-
-commitBranchROB :: CPU -> ROBEntry -> [ROBEntry] -> CPU
-commitBranchROB cpu entry rest =
-  case robValue entry of
-    Just newPc -> -- Branch taken (misprediction)
-      let speculativeTags = map robTag rest
-          revertedRegs = revertOnlySpeculative (reg cpu) speculativeTags
-          clearedStations = clearOnlySpeculative (stations cpu) speculativeTags
-      in trace ("Branch misprediction: flushing " ++ show (length rest) ++ " instructions") 
-         cpu { 
-           rob = [],
-           reg = revertedRegs,
-           stations = clearedStations,
-           pc = newPc,
-           robOffset = robOffset cpu + length (rob cpu)
-         }
-    Nothing -> -- Branch not taken (correct prediction)
-      cpu { rob = rest, robOffset = robOffset cpu + 1 }
-
-revertOnlySpeculative :: [RegValue] -> [Int] -> [RegValue]
-revertOnlySpeculative regs speculativeTags =
-  map (\regVal -> case regVal of
-    Pending tag oldVal -> 
-      if tag `elem` speculativeTags 
-      then Val oldVal
-      else Pending tag oldVal
-    Val v -> Val v
-  ) regs
-
-clearOnlySpeculative :: [ResStation] -> [Int] -> [ResStation]
-clearOnlySpeculative stations speculativeTags =
-  map (\station -> 
-    case robTagRS station of
-      Just tag -> if tag `elem` speculativeTags
-                  then station { busy = False, qj = Nothing, qk = Nothing, vj = 0, vk = 0, robTagRS = Nothing }
-                  else station
-      Nothing -> station
-  ) stations
-
-freeStoreStation :: [ResStation] -> Int -> [ResStation]
-freeStoreStation stations' absTag =
-  map (\s -> if robTagRS s == Just absTag then s { busy = False } else s) stations'
-
-initResStation :: ResStation
-initResStation = ResStation { rsid = RS_ADD1, op = OP_ADD, vj = 0, vk = 0, qj = Nothing, qk = Nothing, a = 0, busy = False, robTagRS = Nothing }
+emptyStation :: RSID -> ResStation
+emptyStation rsid = ResStation {
+    rsid = rsid,
+    operation = OP_ADD,
+    operand1 = Nothing,
+    operand2 = Nothing,
+    waitTag1 = Nothing,
+    waitTag2 = Nothing,
+    immediate = 0,
+    busy = False,
+    destTag = Nothing
+}
 
 initCPU :: [Instruction] -> CPU
 initCPU prog = CPU {
-    reg = [],
-    pc = 0,
-    mem = [],
-    stations = [initResStation { rsid = RS_ADD1 }
-               ,initResStation { rsid = RS_ADD2 }
-               ,initResStation { rsid = RS_LS1 }],
+    registers = initialRegisters,
+    stations = [emptyStation RS_ADD1, emptyStation RS_ADD2, emptyStation RS_LS1],
     rob = [],
+    pc = 0,
+    memory = initialMemory,
     robOffset = 0,
-    program = prog
-  }
-  
-revertRegs :: [RegValue] -> [RegValue]
-revertRegs regs =
-  map (\x -> case x of
-    Pending _ oldVal -> Val oldVal
-    Val v -> Val v) regs
-  
-updateRegs :: [RegValue] -> RegID -> Int -> [RegValue]
-updateRegs regs r value =
-  let oldVal = (regs !! (fromEnum r))
-      idx = fromEnum r
-      newRegValue = case oldVal of 
-        Pending _ x -> Pending value x
-        Val x -> Pending value x
-      newRegs = writeToSeq regs idx newRegValue
-  in newRegs
+    program = prog,
+    cycleCount = 0
+}
 
-mapRegIDToValue :: CPU -> RegID -> RegValue
-mapRegIDToValue cpu r = (reg cpu) !! fromEnum r
+-- ============================================================================
+-- UTILITY FUNCTIONS
+-- ============================================================================
 
-writeToSeq :: [a] -> Int -> a -> [a]
-writeToSeq xs i x = take i xs ++ [x] ++ drop (i + 1) xs
+getReg :: CPU -> RegID -> RegValue
+getReg cpu regId = registers cpu !! fromEnum regId
 
-executeInstructions :: CPU -> IO CPU
-executeInstructions cpu
-  | pc cpu >= length (program cpu) =
-      if all (not . busy) (stations cpu) && null (rob cpu)
-      then return cpu
-      else do
-        let afterExec = runReservationStations cpu
-        let afterCommit = commitROB afterExec
-        executeInstructions afterCommit
-  | otherwise = do
-      let instr = program cpu !! pc cpu
-      newCpu <- case instr of
-        INSTR_NOP -> return (Just cpu { pc = pc cpu + 1 })
-        INSTR_MOV r1 r2 ->
-          let newCpu = cpu { reg = writeToSeq (reg cpu) (fromEnum r1) (mapRegIDToValue cpu r2) }
-          in return (Just newCpu { pc = pc cpu + 1 })
-        _ -> issueInstruction cpu instr
-      case newCpu of
-        Nothing -> do
-          let afterExec = runReservationStations cpu
-          let afterCommit = commitROB afterExec
-          executeInstructions afterCommit
-        Just cpu' -> executeInstructions cpu' { pc = pc cpu' + 1 }
+setReg :: CPU -> RegID -> RegValue -> CPU
+setReg cpu regId val = cpu { registers = updateList (registers cpu) (fromEnum regId) val }
+
+updateList :: [a] -> Int -> a -> [a]
+updateList xs i x = take i xs ++ [x] ++ drop (i + 1) xs
+
+findFreeStation :: CPU -> Operation -> Maybe RSID
+findFreeStation cpu op = case op of
+    OP_ADD -> find (\rsid -> not $ busy $ stations cpu !! fromEnum rsid) [RS_ADD1, RS_ADD2]
+    OP_BEQ -> find (\rsid -> not $ busy $ stations cpu !! fromEnum rsid) [RS_ADD1, RS_ADD2]
+    OP_BNE -> find (\rsid -> not $ busy $ stations cpu !! fromEnum rsid) [RS_ADD1, RS_ADD2]
+    OP_LW  -> if not (busy $ stations cpu !! fromEnum RS_LS1) then Just RS_LS1 else Nothing
+    OP_SW  -> if not (busy $ stations cpu !! fromEnum RS_LS1) then Just RS_LS1 else Nothing
+
+nextROBTag :: CPU -> Int
+nextROBTag cpu = robOffset cpu + length (rob cpu)
+
+-- ============================================================================
+-- REGISTER DEPENDENCY RESOLUTION
+-- ============================================================================
+
+data OperandInfo = OperandInfo {
+    value :: Maybe Int,
+    waitingFor :: Maybe Int
+} deriving (Show)
+
+resolveOperand :: CPU -> RegID -> OperandInfo
+resolveOperand cpu regId = case getReg cpu regId of
+    Val v -> OperandInfo (Just v) Nothing
+    Pending tag oldVal -> OperandInfo Nothing (Just tag)
+
+-- ============================================================================
+-- INSTRUCTION ISSUE PHASE
+-- ============================================================================
+
+getDestReg :: Instruction -> Maybe RegID
+getDestReg instr = case instr of
+    INSTR_ADD rd _ _ -> Just rd
+    INSTR_LW rd _ _  -> Just rd
+    _               -> Nothing
+
+getOperation :: Instruction -> Operation
+getOperation instr = case instr of
+    INSTR_ADD _ _ _ -> OP_ADD
+    INSTR_LW _ _ _  -> OP_LW
+    INSTR_SW _ _ _  -> OP_SW
+    INSTR_BEQ _ _ _ -> OP_BEQ
+    INSTR_BNE _ _ _ -> OP_BNE
+    _             -> error "Invalid operation"
+
+createROBEntry :: CPU -> Instruction -> Int -> ROBEntry
+createROBEntry cpu instr tag = ROBEntry {
+    robTag = tag,
+    robInstr = instr,
+    robDest = getDestReg instr,
+    robResult = Nothing,
+    robAddr = Nothing,
+    robReady = False
+}
+
+createResStation :: CPU -> Instruction -> RSID -> Int -> ResStation
+createResStation cpu instr rsid robTag = case instr of
+    INSTR_ADD _ r1 r2 -> 
+        let op1 = resolveOperand cpu r1
+            op2 = resolveOperand cpu r2
+        in ResStation {
+            rsid = rsid,
+            operation = OP_ADD,
+            operand1 = value op1,
+            operand2 = value op2,
+            waitTag1 = waitingFor op1,
+            waitTag2 = waitingFor op2,
+            immediate = 0,
+            busy = True,
+            destTag = Just robTag
+        }
+    
+    INSTR_LW _ offset baseReg ->
+        let baseOp = resolveOperand cpu baseReg
+        in ResStation {
+            rsid = rsid,
+            operation = OP_LW,
+            operand1 = Nothing,
+            operand2 = value baseOp,
+            waitTag1 = Nothing,
+            waitTag2 = waitingFor baseOp,
+            immediate = offset,
+            busy = True,
+            destTag = Just robTag
+        }
+    
+    INSTR_SW srcReg offset baseReg ->
+        let srcOp = resolveOperand cpu srcReg
+            baseOp = resolveOperand cpu baseReg
+        in ResStation {
+            rsid = rsid,
+            operation = OP_SW,
+            operand1 = value srcOp,
+            operand2 = value baseOp,
+            waitTag1 = waitingFor srcOp,
+            waitTag2 = waitingFor baseOp,
+            immediate = offset,
+            busy = True,
+            destTag = Just robTag
+        }
+    
+    INSTR_BEQ r1 r2 offset ->
+        let op1 = resolveOperand cpu r1
+            op2 = resolveOperand cpu r2
+        in ResStation {
+            rsid = rsid,
+            operation = OP_BEQ,
+            operand1 = value op1,
+            operand2 = value op2,
+            waitTag1 = waitingFor op1,
+            waitTag2 = waitingFor op2,
+            immediate = offset + pc cpu + 1,
+            busy = True,
+            destTag = Just robTag
+        }
+    
+    INSTR_BNE r1 r2 offset ->
+        let op1 = resolveOperand cpu r1
+            op2 = resolveOperand cpu r2
+        in ResStation {
+            rsid = rsid,
+            operation = OP_BNE,
+            operand1 = value op1,
+            operand2 = value op2,
+            waitTag1 = waitingFor op1,
+            waitTag2 = waitingFor op2,
+            immediate = offset + pc cpu + 1,
+            busy = True,
+            destTag = Just robTag
+        }
+    
+    _ -> error "Cannot create reservation station for this instruction"
+
+issueInstruction :: CPU -> Instruction -> Maybe CPU
+issueInstruction cpu instr = case instr of
+    INSTR_NOP -> Just cpu { pc = pc cpu + 1 }
+    
+    INSTR_MOV dst src -> 
+        let srcVal = getReg cpu src
+            newCpu = setReg cpu dst srcVal
+        in Just newCpu { pc = pc cpu + 1 }
+    
+    _ -> case findFreeStation cpu (getOperation instr) of
+        Nothing -> Nothing  -- Structural hazard
+        Just rsid -> 
+            let tag = nextROBTag cpu
+                robEntry = createROBEntry cpu instr tag
+                station = createResStation cpu instr rsid tag
+                newROB = rob cpu ++ [robEntry]
+                newStations = updateList (stations cpu) (fromEnum rsid) station
+                newRegs = case getDestReg instr of
+                    Nothing -> registers cpu
+                    Just destReg -> updateList (registers cpu) (fromEnum destReg) 
+                                   (Pending tag (case getReg cpu destReg of Val v -> v; Pending _ v -> v))
+            in Just cpu {
+                rob = newROB,
+                stations = newStations,
+                registers = newRegs,
+                pc = pc cpu + 1
+            }
+
+-- ============================================================================
+-- EXECUTION PHASE
+-- ============================================================================
+
+canExecute :: ResStation -> Bool
+canExecute station = busy station && isNothing (waitTag1 station) && isNothing (waitTag2 station)
+
+executeStation :: CPU -> ResStation -> Maybe (Int, Maybe Int)  -- (result, store_address)
+executeStation cpu station = case operation station of
+    OP_ADD -> 
+        let result = fromJust (operand1 station) + fromJust (operand2 station)
+        in Just (result, Nothing)
+    
+    OP_LW -> 
+        let addr = immediate station + fromJust (operand2 station)
+        in if addr >= 0 && addr < length (memory cpu)
+           then Just (memory cpu !! addr, Nothing)
+           else error $ "Load address out of bounds: " ++ show addr
+    
+    OP_SW -> 
+        let addr = immediate station + fromJust (operand2 station)
+            val = fromJust (operand1 station)
+        in if addr >= 0 && addr < length (memory cpu)
+           then Just (val, Just addr)
+           else error $ "Store address out of bounds: " ++ show addr
+    
+    OP_BEQ -> 
+        let taken = fromJust (operand1 station) == fromJust (operand2 station)
+        in if taken then Just (immediate station, Nothing) else Just (0, Nothing)
+    
+    OP_BNE -> 
+        let taken = fromJust (operand1 station) /= fromJust (operand2 station)
+        in if taken then Just (immediate station, Nothing) else Just (0, Nothing)
+
+updateROBWithResult :: CPU -> Int -> Int -> Maybe Int -> CPU
+updateROBWithResult cpu robTag result storeAddr = 
+    let robIndex = robTag - robOffset cpu
+        updateEntry entry = entry { robResult = Just result, robAddr = storeAddr, robReady = True }
+        newROB = updateList (rob cpu) robIndex (updateEntry (rob cpu !! robIndex))
+    in cpu { rob = newROB }
+
+forwardResult :: CPU -> Int -> Int -> CPU
+forwardResult cpu robTag result = 
+    let updateStation station = 
+            let station' = if waitTag1 station == Just robTag 
+                          then station { operand1 = Just result, waitTag1 = Nothing }
+                          else station
+                station'' = if waitTag2 station' == Just robTag 
+                           then station' { operand2 = Just result, waitTag2 = Nothing }
+                           else station'
+            in station''
+        newStations = map updateStation (stations cpu)
+    in cpu { stations = newStations }
+
+executeAllStations :: CPU -> CPU
+executeAllStations cpu = 
+    let executeOne cpu' station = 
+            if canExecute station
+            then case executeStation cpu' station of
+                Just (result, storeAddr) -> 
+                    let robTag = fromJust (destTag station)
+                        cpu1 = updateROBWithResult cpu' robTag result storeAddr
+                        cpu2 = forwardResult cpu1 robTag result
+                        clearedStation = station { busy = False, destTag = Nothing }
+                        cpu3 = cpu2 { stations = updateList (stations cpu2) (fromEnum (rsid station)) clearedStation }
+                    in cpu3
+                Nothing -> cpu'
+            else cpu'
+    in foldl executeOne cpu (stations cpu)
+
+-- ============================================================================
+-- COMMIT PHASE
+-- ============================================================================
+
+commitInstruction :: CPU -> ROBEntry -> CPU
+commitInstruction cpu entry = case robInstr entry of
+    INSTR_ADD _ _ _ -> commitRegisterWrite cpu entry
+    INSTR_LW _ _ _  -> commitRegisterWrite cpu entry
+    INSTR_SW _ _ _  -> commitStore cpu entry
+    INSTR_BEQ _ _ _ -> commitBranch cpu entry
+    INSTR_BNE _ _ _ -> commitBranch cpu entry
+    _ -> advanceROB cpu
+
+commitRegisterWrite :: CPU -> ROBEntry -> CPU
+commitRegisterWrite cpu entry = 
+    let result = fromJust (robResult entry)
+        updateRegs = case robDest entry of
+            Nothing -> registers cpu
+            Just destReg -> updateList (registers cpu) (fromEnum destReg) (Val result)
+        cpu1 = cpu { registers = updateRegs }
+        cpu2 = forwardResult cpu1 (robTag entry) result
+    in advanceROB cpu2
+
+commitStore :: CPU -> ROBEntry -> CPU
+commitStore cpu entry = 
+    let addr = fromJust (robAddr entry)
+        val = fromJust (robResult entry)
+        newMem = updateList (memory cpu) addr val
+    in advanceROB cpu { memory = newMem }
+
+commitBranch :: CPU -> ROBEntry -> CPU
+commitBranch cpu entry = case robResult entry of
+    Just targetPC | targetPC /= 0 -> -- Branch taken (misprediction)
+        let speculativeEntries = tail (rob cpu)
+            speculativeTags = map robTag speculativeEntries
+            revertedRegs = revertSpeculativeRegs (registers cpu) speculativeTags
+            clearedStations = map clearStation (stations cpu)
+        in cpu {
+            rob = [],
+            registers = revertedRegs,
+            stations = clearedStations,
+            pc = targetPC,
+            robOffset = robOffset cpu + length (rob cpu)
+        }
+    _ -> advanceROB cpu -- Branch not taken (correct prediction)
+
+revertSpeculativeRegs :: [RegValue] -> [Int] -> [RegValue]
+revertSpeculativeRegs regs speculativeTags = 
+    map (\regVal -> case regVal of
+        Pending tag oldVal -> if tag `elem` speculativeTags then Val oldVal else Pending tag oldVal
+        Val v -> Val v
+    ) regs
+
+clearStation :: ResStation -> ResStation
+clearStation station = station { busy = False, destTag = Nothing, waitTag1 = Nothing, waitTag2 = Nothing }
+
+advanceROB :: CPU -> CPU
+advanceROB cpu = cpu { rob = tail (rob cpu), robOffset = robOffset cpu + 1 }
+
+commitROB :: CPU -> CPU
+commitROB cpu = case rob cpu of
+    [] -> cpu
+    (entry:_) -> if robReady entry 
+                then commitInstruction cpu entry
+                else cpu
+
+-- ============================================================================
+-- MAIN EXECUTION LOOP
+-- ============================================================================
+
+cpuCycle :: CPU -> CPU
+cpuCycle cpu = 
+    let cpu1 = cpu { cycleCount = cycleCount cpu + 1 }
+        cpu2 = executeAllStations cpu1
+        cpu3 = commitROB cpu2
+    in cpu3
+
+executeProgram :: CPU -> IO CPU
+executeProgram cpu
+    | pc cpu >= length (program cpu) && null (rob cpu) && all (not . busy) (stations cpu) = 
+        return cpu
+    | cycleCount cpu > 10000 = do  -- Safety limit
+        putStrLn "Execution limit reached - possible infinite loop"
+        return cpu
+    | otherwise = do
+        -- Try to issue next instruction
+        newCpu <- if pc cpu < length (program cpu)
+                 then case issueInstruction cpu (program cpu !! pc cpu) of
+                     Just cpu' -> return cpu'
+                     Nothing -> return cpu  -- Structural hazard, try next cycle
+                 else return cpu
+        
+        -- Execute one cycle
+        let cycledCpu = cpuCycle newCpu
+        
+        -- Continue
+        executeProgram cycledCpu
+
+-- ============================================================================
+-- TEST PROGRAM
+-- ============================================================================
+
+testProgram :: [Instruction]
+testProgram = [
+    INSTR_LW R1 0 R0,      -- Load 1
+    INSTR_LW R2 4 R0,      -- Load 2  
+    INSTR_ADD R3 R1 R2,    -- Add them
+    INSTR_SW R3 24 R0,     -- Store result
+    INSTR_NOP
+]
 
 main :: IO ()
 main = do
-  print initCPU
+    putStrLn "Starting MIPS Tomasulo Simulation"
+    finalCPU <- executeProgram (initCPU testProgram)
+    putStrLn $ "Execution completed in " ++ show (cycleCount finalCPU) ++ " cycles"
+    putStrLn $ "Final memory: " ++ show (take 8 (memory finalCPU))
+    putStrLn $ "Final registers: " ++ show (registers finalCPU)
