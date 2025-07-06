@@ -72,7 +72,7 @@ runProgramWithState regs mem prog = executeInstructions (initTestCPU regs mem pr
 test1Prog :: [Instruction]
 test1Prog =
   [ INSTR_ADD R1 R2 R0    -- R1 = 3 + 0 = 3
-  , INSTR_BEQ R1 R2 2      -- Taken: skip next instruction
+  , INSTR_BEQ R1 R2 1      -- Taken: skip next instruction
   , INSTR_ADD R3 R3 R4     -- Should be skipped (R3 would be 2+3=5)
   , INSTR_NOP
   ]
@@ -82,7 +82,7 @@ test1Prog =
 test2Prog :: [Instruction]
 test2Prog =
   [ INSTR_ADD R1 R2 R0    -- R1 = 3 + 0 = 3
-  , INSTR_BNE R1 R2 2      -- Not taken (3==3), do not skip
+  , INSTR_BNE R1 R2 1      -- Not taken (3==3), do not skip
   , INSTR_ADD R3 R3 R4     -- Executed: R3 = 2+3=5
   , INSTR_NOP
   ]
@@ -93,7 +93,7 @@ test3Prog :: [Instruction]
 test3Prog =
   [ INSTR_ADD R5 R6 R0    -- R5 = 3 (R6=3)
   , INSTR_ADD R5 R5 R7     -- R5 = 3 + (-1) = 2
-  , INSTR_BNE R5 R0 (-1)   -- Loop back to first ADD if R5 != 0
+  , INSTR_BNE R5 R0 (-2)   -- Loop back to first ADD if R5 != 0
   , INSTR_NOP
   ]
 
@@ -102,7 +102,7 @@ test3Prog =
 test4Prog :: [Instruction]
 test4Prog =
   [ INSTR_ADD R1 R2 R3    -- R1 = 1 + 2 = 3
-  , INSTR_BEQ R1 R4 2      -- Taken (3==3), skip next
+  , INSTR_BEQ R1 R4 1      -- Taken (3==3), skip next
   , INSTR_ADD R5 R5 R6     -- Should be skipped
   , INSTR_NOP
   ]
@@ -113,7 +113,7 @@ test5Prog :: [Instruction]
 test5Prog =
   [ INSTR_ADD R1 R2 R3    -- R1 = 1+2=3
   , INSTR_LW R3 8 R0      -- Load from mem[8] (0)
-  , INSTR_BEQ R1 R4 3     -- Taken (3==3), jump over next 2
+  , INSTR_BEQ R1 R4 2     -- Taken (3==3), jump over next 2
   , INSTR_ADD R5 R1 R3    -- Skipped
   , INSTR_SW R1 12 R0     -- Skipped
   , INSTR_ADD R6 R1 R1    -- R6 = 3+3=6
@@ -123,13 +123,14 @@ test5Prog =
 test6Prog :: [Instruction]
 test6Prog =
   [
-    INSTR_ADD R4 R4 R4 -- R4 = 6
+    INSTR_ADD R1 R7 R1 -- R1 = 1 + (-1) = -1
+  , INSTR_ADD R4 R4 R4 -- R4 = 6
   , INSTR_ADD R4 R4 R4 -- R4 = 12
   , INSTR_ADD R4 R4 R4 -- R4 = 24
-  , INSTR_BEQ R1 R4 4 -- while R1 != 24
+  , INSTR_BEQ R1 R4 3 -- while R1 != 24
   , INSTR_ADD R1 R1 R2 -- add one to R1
   , INSTR_ADD R1 R1 R2 -- add one to R1
-  , INSTR_BEQ R0 R0 (-3)
+  , INSTR_BEQ R0 R0 (-4)
   , INSTR_NOP
   ]
 
@@ -144,10 +145,10 @@ mvMultiplication =
     INSTR_MOV R5 R4,      -- R5 = b1 (counter)
     INSTR_MOV R6 R0,      -- R6 = 0 (accumulator)
     -- Loop a11 * b1
-    INSTR_BEQ R5 R0 4,
+    INSTR_BEQ R5 R0 3,
     INSTR_ADD R6 R6 R3,
     INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
+    INSTR_BEQ R0 R0 (-4),
     INSTR_MOV R1 R6,      -- R1 = a11 * b1 result
 
     INSTR_LW R3 4 R0,     -- R3 = a12
@@ -155,10 +156,10 @@ mvMultiplication =
     INSTR_MOV R5 R4,
     INSTR_MOV R6 R0,
     -- Loop a12 * b2
-    INSTR_BEQ R5 R0 4,
+    INSTR_BEQ R5 R0 3,
     INSTR_ADD R6 R6 R3,
     INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
+    INSTR_BEQ R0 R0 (-4),
     INSTR_ADD R1 R1 R6,   -- R1 += a12 * b2
 
     INSTR_LW R3 8 R0,     -- R3 = a21
@@ -166,10 +167,10 @@ mvMultiplication =
     INSTR_MOV R5 R4,
     INSTR_MOV R6 R0,
     -- Loop a21 * b1
-    INSTR_BEQ R5 R0 4,
+    INSTR_BEQ R5 R0 3,
     INSTR_ADD R6 R6 R3,
     INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
+    INSTR_BEQ R0 R0 (-4),
     INSTR_MOV R2 R6,
 
     INSTR_LW R3 12 R0,    -- R3 = a22
@@ -177,10 +178,10 @@ mvMultiplication =
     INSTR_MOV R5 R4,
     INSTR_MOV R6 R0,
     -- Loop a22 * b2
-    INSTR_BEQ R5 R0 4,
+    INSTR_BEQ R5 R0 3,
     INSTR_ADD R6 R6 R3,
     INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
+    INSTR_BEQ R0 R0 (-4),
     INSTR_ADD R2 R2 R6,
 
     -- Store result
@@ -203,7 +204,7 @@ mvMultiplicationMem =
   
 mvMultiplicationRegs :: [RegValue]
 mvMultiplicationRegs =
-  [ Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0 ]
+  [ Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val (-1) ]
 
 hazardTestProg :: [Instruction]
 hazardTestProg =
@@ -220,13 +221,13 @@ hazardTestProg =
   -- Control hazards
   , INSTR_LW R5 20 R0  -- R5 = 5
   , INSTR_ADD R5 R5 R2  -- R5 = 6
-  , INSTR_BEQ R3 R5 3   -- Taken, skip next 2
+  , INSTR_BEQ R3 R5 2   -- Taken, skip next 2
   , INSTR_ADD R6 R6 R2  -- Should be skipped
   , INSTR_ADD R7 R7 R2  -- Should be skipped
   , INSTR_LW R6 8 R0    -- R6 = 10
   
   -- Branch delay hazards
-  , INSTR_BEQ R6 R0 2   -- Not taken (R6=10 != 0)
+  , INSTR_BEQ R6 R0 1   -- Not taken (R6=10 != 0)
   , INSTR_ADD R7 R6 R2  -- R7 = 11
   , INSTR_SW R7 12 R0   -- mem[12] = 11
   , INSTR_NOP
@@ -273,11 +274,11 @@ main = hspec $ do
       cpu <- runProgramWithState test45Regs testMem test6Prog
       getReg cpu R1 `shouldBe` 24  -- R1 = 3 + 3 + 3
     
---  describe "Matrix vector multiplication" $ do
---    it "computes MV mult correctly" $ do
---      cpu <- runProgramWithState mvMultiplicationRegs mvMultiplicationMem mvMultiplication
---      getMem cpu 24 `shouldBe` 11  -- result[0]
---      getMem cpu 28 `shouldBe` 25  -- result[1]
+  describe "Matrix vector multiplication" $ do
+    it "computes MV mult correctly" $ do
+      cpu <- runProgramWithState mvMultiplicationRegs mvMultiplicationMem mvMultiplication
+      getMem cpu 24 `shouldBe` 11  -- result[0]
+      getMem cpu 28 `shouldBe` 25  -- result[1]
   
   describe "Hazard Stress Test (8 registers)" $ do
     it "handles all hazard types correctly" $ do

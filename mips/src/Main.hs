@@ -62,78 +62,6 @@ data CPU = CPU {
     robOffset :: Int,           -- Absolute index of the head of the ROB
     program  :: [Instruction]   -- Program storage
 } deriving (Show)
-  
-mvMultiplication :: [Instruction]
-mvMultiplication =
-  [
-    -- Load matrix and vector elements
-    INSTR_LW R3 0 R0,     -- R3 = a11
-    INSTR_LW R4 16 R0,    -- R4 = b1
-    -- R1 = a11 * b1
-    INSTR_MOV R1 R0,      -- R1 = 0
-    INSTR_MOV R5 R4,      -- R5 = b1 (counter)
-    INSTR_MOV R6 R0,      -- R6 = 0 (accumulator)
-    -- Loop a11 * b1
-    INSTR_BEQ R5 R0 4,
-    INSTR_ADD R6 R6 R3,
-    INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
-    INSTR_MOV R1 R6,      -- R1 = a11 * b1 result
-
-    INSTR_LW R3 4 R0,     -- R3 = a12
-    INSTR_LW R4 20 R0,    -- R4 = b2
-    INSTR_MOV R5 R4,
-    INSTR_MOV R6 R0,
-    -- Loop a12 * b2
-    INSTR_BEQ R5 R0 4,
-    INSTR_ADD R6 R6 R3,
-    INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
-    INSTR_ADD R1 R1 R6,   -- R1 += a12 * b2
-
-    INSTR_LW R3 8 R0,     -- R3 = a21
-    INSTR_LW R4 16 R0,    -- R4 = b1
-    INSTR_MOV R5 R4,
-    INSTR_MOV R6 R0,
-    -- Loop a21 * b1
-    INSTR_BEQ R5 R0 4,
-    INSTR_ADD R6 R6 R3,
-    INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
-    INSTR_MOV R2 R6,
-
-    INSTR_LW R3 12 R0,    -- R3 = a22
-    INSTR_LW R4 20 R0,    -- R4 = b2
-    INSTR_MOV R5 R4,
-    INSTR_MOV R6 R0,
-    -- Loop a22 * b2
-    INSTR_BEQ R5 R0 4,
-    INSTR_ADD R6 R6 R3,
-    INSTR_ADD R5 R5 R7,
-    INSTR_BEQ R0 R0 (-3),
-    INSTR_ADD R2 R2 R6,
-
-    -- Store result
-    INSTR_SW R1 24 R0,
-    INSTR_SW R2 28 R0,
-    INSTR_NOP
-  ]
-
-mvMultiplicationMem :: [Int]
-mvMultiplicationMem =
-  [ 1, 0, 0, 0   -- 0:  a11
-  , 2, 0, 0, 0   -- 4:  a12
-  , 3, 0, 0, 0   -- 8:  a21
-  , 4, 0, 0, 0   -- 12: a22
-  , 3, 0, 0, 0   -- 16: b1
-  , 4, 0, 0, 0   -- 20: b2
-  , 0, 0, 0, 0   -- 24: result[0]
-  , 0, 0, 0, 0   -- 28: result[1]
-  ]
-  
-mvMultiplicationRegs :: [RegValue]
-mvMultiplicationRegs =
-  [ Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0, Val 0 ]
 
 chooseStation :: CPU -> Instruction -> Maybe RSID
 chooseStation cpu (INSTR_ADD _ _ _) =
@@ -185,8 +113,8 @@ issueInstruction cpu instr = do
             INSTR_ADD _ r1 r2  -> createAddStation cpuWithROB r1 r2 stationID (Just absTag)
             INSTR_LW _ _ _       -> createLoadStation cpuWithROB instr stationID (Just absTag)
             INSTR_SW _ _ _       -> createStoreStation cpuWithROB instr stationID (Just absTag)
-            INSTR_BEQ r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB) stationID (Just absTag) True
-            INSTR_BNE r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB) stationID (Just absTag) False
+            INSTR_BEQ r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB + 1) stationID (Just absTag) True
+            INSTR_BNE r1 r2 ofs-> createBranchStation cpuWithROB r1 r2 (ofs + pc cpuWithROB + 1) stationID (Just absTag) False
             _                  -> error "Invalid instruction for reservation station"
           newStations = writeToSeq (stations cpuWithROB) (fromEnum stationID) newStation
           newRegs = case destReg of
@@ -218,15 +146,14 @@ createLoadStation :: CPU -> Instruction -> RSID -> Maybe Int -> ResStation
 createLoadStation cpu (INSTR_LW r1 srcImm srcReg) selfRsid destRobTag = ResStation {
   rsid = selfRsid,
   op = OP_LW,
-  qj = case state1 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
+  qj = Nothing,  -- No first operand for loads
   qk = case state2 of Val _ -> Nothing; Pending robTag' _ -> Just robTag',
-  vj = case state1 of Val v -> v; Pending _ _ -> 0,
+  vj = 0,        -- No first operand
   vk = case state2 of Val v -> v; Pending _ _ -> 0,
   a = srcImm,
   busy = True,
   robTagRS = destRobTag
 } where 
-    state1 = mapRegIDToValue cpu r1
     state2 = mapRegIDToValue cpu srcReg
 createLoadStation _ _ _ _ = error "Invalid instruction for load station"
 
@@ -380,36 +307,52 @@ commitROB cpu =
               newStations = freeStoreStation (stations cpu) (robTag entry)
               newCpu = cpu { mem = newMem, stations = newStations, rob = rest, robOffset = robOffset cpu + 1 }
           in trace ("committed store: " ++ show newCpu) newCpu
-        INSTR_BEQ _ _ _ ->
-          case robValue entry of
-            Just newPc ->  -- Branch taken: flush ROB, reset stations, update PC
-              let flushedCPU = cpu {
-                    pc = newPc,
-                    rob = [],
-                    robOffset = robOffset cpu + length (rob cpu),
-                    stations = map clearStation (stations cpu),
-                    reg = revertRegs (reg cpu)
-                  }
-              in trace ("Branch committed, new cpu: " ++ show flushedCPU) flushedCPU
-            _ -> cpu { rob = rest, robOffset = robOffset cpu + 1 }
-        INSTR_BNE _ _ _ ->
-          case robValue entry of
-            Just newPc ->  -- Branch taken: flush ROB, reset stations, update PC
-              let flushedCPU = cpu {
-                    pc = newPc,
-                    rob = [],
-                    robOffset = robOffset cpu + length (rob cpu),
-                    stations = map clearStation (stations cpu),
-                    reg = revertRegs (reg cpu)
-                  }
-              in trace ("Branch committed, new cpu: " ++ show flushedCPU) flushedCPU
-            _ -> cpu { rob = rest, robOffset = robOffset cpu + 1 }
+        INSTR_BEQ _ _ _ -> commitBranchROB cpu entry rest
+        INSTR_BNE _ _ _ -> commitBranchROB cpu entry rest
         _ -> cpu { rob = rest, robOffset = robOffset cpu + 1 }
       else cpu
   where
     unwrap (Just x) = x
     unwrap Nothing  = error "ROB entry not ready"
     clearStation s = s { busy = False }
+
+commitBranchROB :: CPU -> ROBEntry -> [ROBEntry] -> CPU
+commitBranchROB cpu entry rest =
+  case robValue entry of
+    Just newPc -> -- Branch taken (misprediction)
+      let speculativeTags = map robTag rest
+          revertedRegs = revertOnlySpeculative (reg cpu) speculativeTags
+          clearedStations = clearOnlySpeculative (stations cpu) speculativeTags
+      in trace ("Branch misprediction: flushing " ++ show (length rest) ++ " instructions") 
+         cpu { 
+           rob = [],
+           reg = revertedRegs,
+           stations = clearedStations,
+           pc = newPc,
+           robOffset = robOffset cpu + length (rob cpu)
+         }
+    Nothing -> -- Branch not taken (correct prediction)
+      cpu { rob = rest, robOffset = robOffset cpu + 1 }
+
+revertOnlySpeculative :: [RegValue] -> [Int] -> [RegValue]
+revertOnlySpeculative regs speculativeTags =
+  map (\regVal -> case regVal of
+    Pending tag oldVal -> 
+      if tag `elem` speculativeTags 
+      then Val oldVal
+      else Pending tag oldVal
+    Val v -> Val v
+  ) regs
+
+clearOnlySpeculative :: [ResStation] -> [Int] -> [ResStation]
+clearOnlySpeculative stations speculativeTags =
+  map (\station -> 
+    case robTagRS station of
+      Just tag -> if tag `elem` speculativeTags
+                  then station { busy = False, qj = Nothing, qk = Nothing, vj = 0, vk = 0, robTagRS = Nothing }
+                  else station
+      Nothing -> station
+  ) stations
 
 freeStoreStation :: [ResStation] -> Int -> [ResStation]
 freeStoreStation stations' absTag =
@@ -420,9 +363,9 @@ initResStation = ResStation { rsid = RS_ADD1, op = OP_ADD, vj = 0, vk = 0, qj = 
 
 initCPU :: [Instruction] -> CPU
 initCPU prog = CPU {
-    reg = mvMultiplicationRegs,
+    reg = [],
     pc = 0,
-    mem = mvMultiplicationMem,
+    mem = [],
     stations = [initResStation { rsid = RS_ADD1 }
                ,initResStation { rsid = RS_ADD2 }
                ,initResStation { rsid = RS_LS1 }],
@@ -479,7 +422,4 @@ executeInstructions cpu
 
 main :: IO ()
 main = do
-    putStrLn "\nExecuting Branch Program:"
-    finalCpuState <- executeInstructions (initCPU mvMultiplication)
-    putStrLn "\nFinal CPU State after Branch Program:"
-    print finalCpuState
+  print initCPU
