@@ -450,7 +450,7 @@ testProgram = [
     INSTR_ADD R3 R1 R2,    -- Add them
     INSTR_SW R3 24 R0,     -- Store result
     INSTR_NOP
-]
+  ]
 
 main :: IO ()
 main = do
