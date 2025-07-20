@@ -49,7 +49,7 @@ test-suite mips-test
   type:                exitcode-stdio-1.0
   main-is:             MainTest.hs
   hs-source-dirs:      test
-  build-depends:       base >= 4.7 && < 5, mips, hspec
+  build-depends:       base >= 4.7 && < 5, mips, hspec, QuickCheck
   default-language:    Haskell2010
   ghc-options:         -Wall
                        -main-is MainTest

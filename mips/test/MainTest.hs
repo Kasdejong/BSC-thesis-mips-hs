@@ -1,6 +1,9 @@
 module MainTest where
 
 import Test.Hspec
+import Test.Hspec.QuickCheck
+import Test.QuickCheck (Gen, Property, ioProperty, forAll, Arbitrary(..), elements, chooseInt, verbose)
+import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Main
 
 -- ============================================================================
@@ -37,10 +40,27 @@ initTestCPU regs mem prog = CPU
   , program = prog
   , cycleCount = 0
   }
+  
+-- Custom CPU initializer for in-order execution
+initInOrderCpu :: [RegValue] -> [Int] -> [Instruction] -> InOrderCPU
+initInOrderCpu regs mem prog = InOrderCPU
+  { inOrderRegisters = 
+    map (\regVal -> 
+        case regVal of
+        Val v -> v
+        _ -> 0
+    ) regs,
+    inOrderMemory = mem,
+    inOrderProgram = prog,
+    inOrderPC = 0
+  }
 
 -- Helper to run a program with custom state
 runProgramWithState :: [RegValue] -> [Int] -> [Instruction] -> IO CPU
 runProgramWithState regs mem prog = executeProgram (initTestCPU regs mem prog)
+
+runProgramInOrderWithState :: [RegValue] -> [Int] -> [Instruction] -> IO InOrderCPU
+runProgramInOrderWithState regs mem prog = executeProgramInOrder (initInOrderCpu regs mem prog)
 
 -- ============================================================================
 -- TEST DATA
@@ -257,8 +277,90 @@ hazardTestRegs :: [RegValue]
 hazardTestRegs = replicate 8 (Val 0)
 
 -- ============================================================================
+-- QuickCheck utilities
+-- ============================================================================
+
+-- Generator for register IDs
+genRegID :: Gen RegID
+genRegID = elements [minBound .. maxBound]
+
+genDestRegID :: Gen RegID
+genDestRegID = elements [R1, R2, R3, R4, R5, R6, R7] -- Exclude R0
+
+-- Generator for small (safe) memory offsets
+genSmallInt :: Gen Int
+genSmallInt = chooseInt (0, 15) -- Adjust if you want larger/smaller memories
+
+-- Generator for random programs:
+-- Generate only forward branches (no infinite loops)
+genSafeProgramNoLoops :: Int -> Gen [Instruction]
+genSafeProgramNoLoops len = go 0
+  where
+    go i
+      | i >= len  = return []
+      | otherwise = do
+          instrType <- elements [0..6 :: Int]
+          instr <- case instrType of
+            0 -> do rd <- genDestRegID; r1 <- genRegID; r2 <- genRegID
+                    return $ INSTR_ADD rd r1 r2
+            1 -> do rd <- genDestRegID; rs <- genRegID
+                    return $ INSTR_MOV rd rs
+            2 -> do rd <- genDestRegID; offset <- genSmallInt;
+                    return $ INSTR_LW rd offset R0
+            3 -> do src <- genRegID; offset <- genSmallInt;
+                    return $ INSTR_SW src offset R0
+            4 -> do r1 <- genRegID; r2 <- genRegID
+                    let maxForward = len - (i + 1)
+                    off <- if maxForward <= 0
+                           then return 0
+                           else chooseInt (1, min maxForward 10)
+                    return $ INSTR_BEQ r1 r2 off
+            5 -> do r1 <- genRegID; r2 <- genRegID
+                    let maxForward = len - (i + 1)
+                    off <- if maxForward <= 0
+                           then return 0
+                           else chooseInt (1, min maxForward 10)
+                    return $ INSTR_BNE r1 r2 off
+            _ -> return INSTR_NOP
+          (instr :) <$> go (i + 1)
+          
+-- quickCheck property to compare OOO and InOrder execution
+prop_CpusProduceSameResults :: Property
+prop_CpusProduceSameResults =
+  forAll (genSafeProgramNoLoops 30) $ \prog ->
+    ioProperty $ do
+      let -- Use the spicy values above
+          initRegs = [ Val 0, Val (-7), Val 1000, Val 3, Val (-123), Val 17, Val 256, Val (-1) ]
+          initMem  = take 64 $ cycle [5, -9, 77, 16000, -88, 2, 0, 555]
+
+      cpuOOO <- runProgramWithState initRegs initMem prog
+      cpuInO <- runProgramInOrderWithState initRegs initMem prog
+
+      let regsOOO = map (getRegValue cpuOOO) [R0 .. R7]
+          regsInO = inOrderRegisters cpuInO
+          memOOO  = memory cpuOOO
+          memInO  = inOrderMemory cpuInO
+
+      return $ regsOOO == regsInO && memOOO == memInO
+
+
+-- ============================================================================
 -- TEST SUITE
 -- ============================================================================
+
+prop_models_agree :: [Instruction] -> Property
+prop_models_agree instrs = monadicIO $ do
+  let initRegs = replicate 8 (Val 0)
+      initMem  = replicate 64 0
+  cpu1 <- run $ runProgramWithState initRegs initMem instrs
+  cpu2 <- run $ runProgramInOrderWithState initRegs initMem instrs
+  let regs1 = map (\regs -> case regs of
+                Val v -> v
+                _ -> error "reg value not final on execution completion") (registers cpu1)
+      regs2 = inOrderRegisters cpu2
+      mem1 = memory cpu1
+      mem2 = inOrderMemory cpu2
+  assert (regs1 == regs2 && mem1 == mem2)
 
 main :: IO ()
 main = hspec $ do
@@ -316,3 +418,8 @@ main = hspec $ do
     it "should handle complex programs without infinite loops" $ do
       cpu <- runProgramWithState hazardTestRegs hazardTestMem hazardTestProg
       getCycles cpu `shouldSatisfy` (< 1000)
+
+  describe "QuickCheck Tests" $ do
+    modifyMaxSuccess (const 1000) $ do
+      prop "OOO matches InOrder for arbitrary program" $ prop_CpusProduceSameResults
+        
