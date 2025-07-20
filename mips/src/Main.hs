@@ -23,7 +23,10 @@ data Operation = OP_ADD | OP_LW | OP_SW | OP_BEQ | OP_BNE deriving (Show, Eq)
 
 data RegID = R0 | R1 | R2 | R3 | R4 | R5 | R6 | R7 deriving (Show, Eq, Enum, Bounded)
 
-data RegValue = Val Int | Pending Int Int deriving (Show, Eq)
+data RegValue = Val Int | Pending Int Int deriving (Eq)
+instance Show RegValue where
+    show (Val v) = show v
+    show (Pending tag oldVal) = "Pending " ++ show tag ++ " " ++ show oldVal
 
 data RSID = RS_ADD1 | RS_ADD2 | RS_LS1 deriving (Show, Eq, Enum, Bounded)
 
@@ -438,6 +441,85 @@ executeProgram cpu
         
         -- Continue
         executeProgram cycledCpu
+        
+-- ============================================================================
+-- IN-ORDER CPU
+-- ============================================================================
+
+-- This CPU executes instructions in-order, respecting the program counter.
+data InOrderCPU = InOrderCPU {
+    inOrderRegisters :: [Int],
+    inOrderMemory :: [Int],
+    inOrderPC :: Int,
+    inOrderProgram :: [Instruction]
+} deriving (Show)
+
+initInOrderCPU :: [Instruction] -> InOrderCPU
+initInOrderCPU prog = InOrderCPU {
+    inOrderRegisters = map (\regVal -> case regVal of
+        Val v -> v
+        _ -> 0
+    ) initialRegisters,
+    inOrderMemory = initialMemory,
+    inOrderPC = 0,
+    inOrderProgram = prog
+}
+
+setInOrderReg :: [Int] -> Int -> Int -> [Int]
+setInOrderReg regs idx val = take idx regs ++ [val] ++ drop (idx + 1) regs
+
+-- Execute a single instruction in the In-Order CPU
+executeInOrderInstruction :: InOrderCPU -> Instruction -> InOrderCPU
+executeInOrderInstruction cpu instr = case instr of
+    INSTR_ADD rd r1 r2 -> cpu {
+        inOrderRegisters = setInOrderReg (inOrderRegisters cpu) (fromEnum rd)
+            (inOrderRegisters cpu !! fromEnum r1 + inOrderRegisters cpu !! fromEnum r2),
+        inOrderPC = inOrderPC cpu + 1
+    }
+    INSTR_MOV rd rs -> cpu {
+        inOrderRegisters = setInOrderReg (inOrderRegisters cpu) (fromEnum rd)
+            (inOrderRegisters cpu !! fromEnum rs),
+        inOrderPC = inOrderPC cpu + 1
+    }
+    INSTR_LW rd offset baseReg -> 
+        let baseVal = inOrderRegisters cpu !! fromEnum baseReg
+            addr = offset + baseVal
+            val = inOrderMemory cpu !! addr
+        in cpu {
+            inOrderRegisters = setInOrderReg (inOrderRegisters cpu) (fromEnum rd) val,
+            inOrderPC = inOrderPC cpu + 1
+        }
+    INSTR_SW srcReg offset baseReg -> 
+        let srcVal = inOrderRegisters cpu !! fromEnum srcReg
+            baseVal = inOrderRegisters cpu !! fromEnum baseReg
+            addr = offset + baseVal
+        in cpu {
+            inOrderMemory = updateList (inOrderMemory cpu) addr srcVal,
+            inOrderPC = inOrderPC cpu + 1
+        }
+    INSTR_BEQ r1 r2 offset ->
+        let val1 = inOrderRegisters cpu !! fromEnum r1
+            val2 = inOrderRegisters cpu !! fromEnum r2
+        in if val1 == val2
+           then cpu { inOrderPC = inOrderPC cpu + offset + 1 }
+           else cpu { inOrderPC = inOrderPC cpu + 1 }
+    INSTR_BNE r1 r2 offset ->
+        let val1 = inOrderRegisters cpu !! fromEnum r1
+            val2 = inOrderRegisters cpu !! fromEnum r2
+        in if val1 /= val2
+           then cpu { inOrderPC = inOrderPC cpu + offset + 1 }
+           else cpu { inOrderPC = inOrderPC cpu + 1 }
+    INSTR_NOP ->
+        cpu { inOrderPC = inOrderPC cpu + 1 }
+    _ -> error "Unsupported instruction"
+
+executeProgramInOrder :: InOrderCPU -> IO InOrderCPU
+executeProgramInOrder cpu
+    | inOrderPC cpu >= length (inOrderProgram cpu) = return cpu
+    | otherwise = do
+        let instr = inOrderProgram cpu !! inOrderPC cpu
+        let newCpu = executeInOrderInstruction cpu instr
+        executeProgramInOrder newCpu
 
 -- ============================================================================
 -- TEST PROGRAM
@@ -459,3 +541,9 @@ main = do
     putStrLn $ "Execution completed in " ++ show (cycleCount finalCPU) ++ " cycles"
     putStrLn $ "Final memory: " ++ show (take 8 (memory finalCPU))
     putStrLn $ "Final registers: " ++ show (registers finalCPU)
+    
+    putStrLn "Starting In-Order CPU Simulation"
+    inOrderCPU <- executeProgramInOrder (initInOrderCPU testProgram)
+    putStrLn $ "Final In-Order memory: " ++ show (take 8 (inOrderMemory inOrderCPU))
+    putStrLn $ "Final In-Order registers: " ++ show (inOrderRegisters inOrderCPU)
+        
