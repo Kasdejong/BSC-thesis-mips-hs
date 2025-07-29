@@ -39,6 +39,7 @@ initTestCPU regs mem prog = CPU
   , robOffset = 0
   , program = prog
   , cycleCount = 0
+  , instructionsLeft = 3000
   }
   
 -- Custom CPU initializer for in-order execution
@@ -52,7 +53,8 @@ initInOrderCpu regs mem prog = InOrderCPU
     ) regs,
     inOrderMemory = mem,
     inOrderProgram = prog,
-    inOrderPC = 0
+    inOrderPC = 0,
+    inOrderInstructionsLeft = 3000
   }
 
 -- Helper to run a program with custom state
@@ -310,16 +312,16 @@ genSafeProgramNoLoops len = go 0
             3 -> do src <- genRegID; offset <- genSmallInt;
                     return $ INSTR_SW src offset R0
             4 -> do r1 <- genRegID; r2 <- genRegID
-                    let maxForward = len - (i + 1)
+                    let maxForward = len - (i + 1); maxBackward = i
                     off <- if maxForward <= 0
                            then return 0
-                           else chooseInt (1, min maxForward 10)
+                           else chooseInt (-maxBackward, min maxForward 10)
                     return $ INSTR_BEQ r1 r2 off
             5 -> do r1 <- genRegID; r2 <- genRegID
-                    let maxForward = len - (i + 1)
+                    let maxForward = len - (i + 1); maxBackward = i
                     off <- if maxForward <= 0
                            then return 0
-                           else chooseInt (1, min maxForward 10)
+                           else chooseInt (-maxBackward, min maxForward 10)
                     return $ INSTR_BNE r1 r2 off
             _ -> return INSTR_NOP
           (instr :) <$> go (i + 1)
@@ -421,5 +423,5 @@ main = hspec $ do
 
   describe "QuickCheck Tests" $ do
     modifyMaxSuccess (const 1000) $ do
-      prop "OOO matches InOrder for arbitrary program" $ prop_CpusProduceSameResults
+      prop "OOO matches InOrder for arbitrary program" $ verbose prop_CpusProduceSameResults
         

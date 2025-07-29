@@ -61,7 +61,8 @@ data CPU = CPU {
     memory      :: [Int],
     robOffset   :: Int,
     program     :: [Instruction],
-    cycleCount  :: Int
+    cycleCount  :: Int,
+    instructionsLeft :: Int
 } deriving (Show)
 
 -- ============================================================================
@@ -98,7 +99,8 @@ initCPU prog = CPU {
     memory = initialMemory,
     robOffset = 0,
     program = prog,
-    cycleCount = 0
+    cycleCount = 0,
+    instructionsLeft = 3000
 }
 
 -- ============================================================================
@@ -247,32 +249,35 @@ createResStation cpu instr rsid robTag = case instr of
     _ -> error "Cannot create reservation station for this instruction"
 
 issueInstruction :: CPU -> Instruction -> Maybe CPU
-issueInstruction cpu instr = case instr of
-    INSTR_NOP -> Just cpu { pc = pc cpu + 1 }
-    
-    INSTR_MOV dst src -> 
-        let srcVal = getReg cpu src
-            newCpu = setReg cpu dst srcVal
-        in Just newCpu { pc = pc cpu + 1 }
-    
-    _ -> case findFreeStation cpu (getOperation instr) of
-        Nothing -> Nothing  -- Structural hazard
-        Just rsid -> 
-            let tag = nextROBTag cpu
-                robEntry = createROBEntry cpu instr tag
-                station = createResStation cpu instr rsid tag
-                newROB = rob cpu ++ [robEntry]
-                newStations = updateList (stations cpu) (fromEnum rsid) station
-                newRegs = case getDestReg instr of
-                    Nothing -> registers cpu
-                    Just destReg -> updateList (registers cpu) (fromEnum destReg) 
-                                   (Pending tag (case getReg cpu destReg of Val v -> v; Pending _ v -> v))
-            in Just cpu {
-                rob = newROB,
-                stations = newStations,
-                registers = newRegs,
-                pc = pc cpu + 1
-            }
+issueInstruction cpu instr 
+  | instructionsLeft cpu <= 0 = Nothing  -- No more instructions to issue
+  | otherwise = case instr of
+      INSTR_NOP -> Just cpu { pc = pc cpu + 1, instructionsLeft = instructionsLeft cpu - 1 }
+      
+      INSTR_MOV dst src -> 
+          let srcVal = getReg cpu src
+              newCpu = setReg cpu dst srcVal
+          in Just newCpu { pc = pc cpu + 1, instructionsLeft = instructionsLeft cpu - 1 }
+      
+      _ -> case findFreeStation cpu (getOperation instr) of
+          Nothing -> Nothing  -- Structural hazard
+          Just rsid -> 
+              let tag = nextROBTag cpu
+                  robEntry = createROBEntry cpu instr tag
+                  station = createResStation cpu instr rsid tag
+                  newROB = rob cpu ++ [robEntry]
+                  newStations = updateList (stations cpu) (fromEnum rsid) station
+                  newRegs = case getDestReg instr of
+                      Nothing -> registers cpu
+                      Just destReg -> updateList (registers cpu) (fromEnum destReg) 
+                                     (Pending tag (case getReg cpu destReg of Val v -> v; Pending _ v -> v))
+              in Just cpu {
+                  rob = newROB,
+                  stations = newStations,
+                  registers = newRegs,
+                  pc = pc cpu + 1,
+                  instructionsLeft = instructionsLeft cpu - 1
+              }
 
 -- ============================================================================
 -- EXECUTION PHASE
@@ -423,10 +428,7 @@ cpuCycle cpu =
 
 executeProgram :: CPU -> IO CPU
 executeProgram cpu
-    | pc cpu >= length (program cpu) && null (rob cpu) && all (not . busy) (stations cpu) = 
-        return cpu
-    | cycleCount cpu > 10000 = do  -- Safety limit
-        putStrLn "Execution limit reached - possible infinite loop"
+    | (pc cpu >= length (program cpu) || instructionsLeft cpu == 0) && null (rob cpu) && all (not . busy) (stations cpu) = 
         return cpu
     | otherwise = do
         -- Try to issue next instruction
@@ -451,7 +453,8 @@ data InOrderCPU = InOrderCPU {
     inOrderRegisters :: [Int],
     inOrderMemory :: [Int],
     inOrderPC :: Int,
-    inOrderProgram :: [Instruction]
+    inOrderProgram :: [Instruction],
+    inOrderInstructionsLeft :: Int
 } deriving (Show)
 
 initInOrderCPU :: [Instruction] -> InOrderCPU
@@ -462,7 +465,8 @@ initInOrderCPU prog = InOrderCPU {
     ) initialRegisters,
     inOrderMemory = initialMemory,
     inOrderPC = 0,
-    inOrderProgram = prog
+    inOrderProgram = prog,
+    inOrderInstructionsLeft = 3000
 }
 
 setInOrderReg :: [Int] -> Int -> Int -> [Int]
@@ -515,11 +519,13 @@ executeInOrderInstruction cpu instr = case instr of
 
 executeProgramInOrder :: InOrderCPU -> IO InOrderCPU
 executeProgramInOrder cpu
-    | inOrderPC cpu >= length (inOrderProgram cpu) = return cpu
+    | inOrderPC cpu >= length (inOrderProgram cpu) || inOrderInstructionsLeft cpu <= 0 = return cpu
     | otherwise = do
         let instr = inOrderProgram cpu !! inOrderPC cpu
         let newCpu = executeInOrderInstruction cpu instr
-        executeProgramInOrder newCpu
+        executeProgramInOrder newCpu {
+            inOrderInstructionsLeft = inOrderInstructionsLeft cpu - 1
+        }
 
 -- ============================================================================
 -- TEST PROGRAM
